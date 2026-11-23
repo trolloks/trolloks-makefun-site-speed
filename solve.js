@@ -754,7 +754,6 @@ function renderNodes(nodes, scope, ctx, depth, parts) {
 // ------------------------------------------------------------------ front matter
 
 const KEYS = ['title', 'date', 'tags', 'draft', 'layout', 'slug', 'summary'];
-const FM_LINE = /^([a-z_]+):(?: (.*))?$/;
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 const NAME_RE = /^[a-z0-9-]+$/;
 const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -837,30 +836,46 @@ function parseFrontMatter(text) {
     from = at + 1;
   }
   if (closeAt === -1) return { error: 'the front matter is not closed' };
-  const lines = text.slice(0, closeAt).split('\n');
-  const close = lines.length - 1;
   const data = {};
-  for (let i = 1; i < close; i++) {
-    const line = lines[i];
-    if (isBlank(line) || line.charCodeAt(0) === 35) continue;
-    const m = FM_LINE.exec(line);
-    if (!m) return { error: `line ${i + 1} is not "key: value"` };
-    const key = m[1];
-    let raw = m[2] ?? '';
-    const rn = raw.length;
-    let re = rn;
-    while (re > 0) {
-      const c = raw.charCodeAt(re - 1);
-      if (c !== 32 && c !== 9) break;
-      re--;
+  let pos = 4;
+  let lineNo = 2;
+  while (pos < closeAt) {
+    let eol = text.indexOf('\n', pos);
+    if (eol === -1 || eol > closeAt) eol = closeAt;
+    const c0 = text.charCodeAt(pos);
+    if (c0 === 10 || c0 === 35 || blankRange(text, pos, eol)) {
+      // an empty line, or a comment
+    } else {
+      let i = pos;
+      while (i < eol) {
+        const c = text.charCodeAt(i);
+        if ((c >= 97 && c <= 122) || c === 95) i++;
+        else break;
+      }
+      const keyEnd = i;
+      if (keyEnd === pos || i >= eol || text.charCodeAt(i) !== 58 || (i + 1 < eol && text.charCodeAt(i + 1) !== 32)) {
+        return { error: `line ${lineNo} is not "key: value"` };
+      }
+      const key = text.slice(pos, keyEnd);
+      let raw = '';
+      if (i + 1 < eol) {
+        let re = eol;
+        while (re > i + 2) {
+          const c = text.charCodeAt(re - 1);
+          if (c !== 32 && c !== 9) break;
+          re--;
+        }
+        if (re > i + 2) raw = text.slice(i + 2, re);
+      }
+      if (KEYS.indexOf(key) === -1) return { error: `unknown key "${key}"` };
+      if (Object.hasOwn(data, key)) return { error: `key "${key}" is given twice` };
+      if (raw === '') return { error: `key "${key}" has no value` };
+      const v = valueOf(key, raw);
+      if ('error' in v) return v;
+      data[key] = v.value;
     }
-    if (re !== rn) raw = raw.slice(0, re);
-    if (KEYS.indexOf(key) === -1) return { error: `unknown key "${key}"` };
-    if (Object.hasOwn(data, key)) return { error: `key "${key}" is given twice` };
-    if (raw === '') return { error: `key "${key}" has no value` };
-    const v = valueOf(key, raw);
-    if ('error' in v) return v;
-    data[key] = v.value;
+    pos = eol + 1;
+    lineNo++;
   }
   if (!Object.hasOwn(data, 'title')) return { error: 'no title' };
   return { data, body: text.slice(closeAt + 3 === text.length ? text.length : closeAt + 4) };
