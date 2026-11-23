@@ -273,12 +273,14 @@ function hasSpace(s) {
 }
 
 const INLINE_RE = /[\\`*[&<>"']/g;
+const HAS_INLINE = /[\\`*[&<>"']/;
 
 /**
  * `s` rendered inline, in one pass: a backslash escape, a code span, strong, emphasis, a link, or one of the
  * five HTML-escaped characters; `env.link(target)` is a link's href.
  */
 function inline(s, env) {
+  if (!HAS_INLINE.test(s)) return s;
   let out = '';
   let last = 0;
   const n = s.length;
@@ -1109,39 +1111,45 @@ export function build(input) {
   const readCache = new Map();
   const readsByName = new Map();
   const sortedByName = new Map();
-  const ids = new Map();
+  const UNDEF = {};
   const cache = new Map();
   const ctx = {
     templates,
     include(name, nodes, scope, depth) {
       let names = readsByName.get(name);
       if (names === undefined) {
-        names = readsOf(name, templates, new Set(), new Set(), readCache);
+        const set = readsOf(name, templates, new Set(), new Set(), readCache);
+        names = set === null ? null : [...set].sort();
         readsByName.set(name, names);
       }
       let bucket;
       let key;
-      if (names !== null) {
-        key = String(depth);
-        let sorted = sortedByName.get(name);
-        if (sorted === undefined) {
-          sorted = [...names].sort();
-          sortedByName.set(name, sorted);
+      if (names === null) {
+        bucket = undefined;
+      } else {
+        let byDepth = cache.get(name);
+        if (byDepth === undefined) {
+          byDepth = [];
+          cache.set(name, byDepth);
         }
-        for (let k = 0; k < sorted.length; k++) {
-          const v = lookupName(scope, sorted[k]);
-          if (v === undefined) key += '|u';
-          else if (v !== null && typeof v === 'object') key += '|o' + idOf(v);
-          else if (typeof v === 'string') key += '|s' + v;
-          else key += '|n' + (typeof v === 'number' ? v : v === true ? 1 : 0);
-        }
-        bucket = cache.get(name);
+        bucket = byDepth[depth];
         if (bucket === undefined) {
           bucket = new Map();
-          cache.set(name, bucket);
+          byDepth[depth] = bucket;
         }
-        const hit = bucket.get(key);
-        if (hit !== undefined) return hit;
+        for (let k = 0; k < names.length; k++) {
+          const v = lookupName(scope, names[k]);
+          key = v === undefined ? UNDEF : v !== null && typeof v === 'object' ? v : typeof v + ':' + v;
+          if (k === names.length - 1) break;
+          let next = bucket.get(key);
+          if (next === undefined) {
+            next = new Map();
+            bucket.set(key, next);
+          }
+          bucket = next;
+        }
+        if (names.length === 0) key = UNDEF;
+        if (bucket.has(key)) return bucket.get(key);
       }
       const parts = [];
       renderNodes(nodes, scope, ctx, depth + 1, parts);
@@ -1149,14 +1157,6 @@ export function build(input) {
       if (bucket !== undefined) bucket.set(key, html);
       return html;
     },
-  };
-  const idOf = (v) => {
-    let id = ids.get(v);
-    if (id === undefined) {
-      id = ids.size;
-      ids.set(v, id);
-    }
-    return id;
   };
   const render = (name, vars) => {
     const nodes = templates.get(name);
