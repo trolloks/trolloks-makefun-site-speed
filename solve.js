@@ -905,21 +905,10 @@ function resolvePath(dir, rel) {
 const SPACE = new Uint8Array(128);
 for (const ch of ' \t\n\v\f\r') SPACE[ch.charCodeAt(0)] = 1;
 
+/** The words of a body: its runs of characters other than whitespace (the reference's own `\S+` count). */
 function wordsOf(text) {
-  let n = 0;
-  let inWord = false;
-  for (let i = 0; i < text.length; i++) {
-    const c = text.charCodeAt(i);
-    let space;
-    if (c < 128) space = SPACE[c] === 1;
-    else space = c === 0xa0 || (c >= 0x1680 && (c === 0x1680 || (c >= 0x2000 && c <= 0x200a) || c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000 || c === 0xfeff));
-    if (space) inWord = false;
-    else if (!inWord) {
-      inWord = true;
-      n++;
-    }
-  }
-  return n;
+  const m = text.match(/\S+/g);
+  return m === null ? 0 : m.length;
 }
 
 const SCHEME_RE = /^[A-Za-z][A-Za-z0-9+.-]*:/;
