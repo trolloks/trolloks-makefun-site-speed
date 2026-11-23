@@ -23,29 +23,21 @@ function esc(s) {
 
 const SLUG_MAX = 64;
 
+/** The slug of `text`: NFKD, marks and non-ASCII dropped, ASCII lowered, runs of the rest one "-". */
+const MARKS = /\p{M}/gu;
+const UPPER = /[A-Z]/g;
+const NON_SLUG = /[^a-z0-9]+/g;
 function slugifyRaw(text) {
-  const plain = text.normalize('NFKD').replace(/\p{M}/gu, '');
-  let out = '';
-  let gap = false;
-  for (let i = 0; i < plain.length; i++) {
-    const c = plain.charCodeAt(i);
-    let keep;
-    if (c >= 65 && c <= 90) keep = c + 32;
-    else if ((c >= 97 && c <= 122) || (c >= 48 && c <= 57)) keep = c;
-    else {
-      gap = out.length > 0;
-      continue;
-    }
-    if (gap) out += '-';
-    gap = false;
-    out += String.fromCharCode(keep);
-  }
+  const plain = text.normalize('NFKD').replace(MARKS, '').replace(UPPER, (c) => c.toLowerCase()).replace(NON_SLUG, '-');
+  let out = plain;
+  if (out.charCodeAt(0) === 45) out = out.slice(1);
   if (out.length > SLUG_MAX) out = out.slice(0, SLUG_MAX);
   let e = out.length;
   while (e > 0 && out.charCodeAt(e - 1) === 45) e--;
   if (e !== out.length) out = out.slice(0, e);
   return out === '' ? 'untitled' : out;
 }
+
 
 function uniqueSlug(slug, taken) {
   let out = slug;
@@ -281,13 +273,9 @@ function findSingleStar(s, from) {
   return -1;
 }
 
-function hasSpace(s) {
-  for (let i = 0; i < s.length; i++) {
-    const c = s.charCodeAt(i);
-    if (c === 32 || c === 9 || c === 10 || c === 13 || c === 11 || c === 12 || c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a) || c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000 || c === 0xfeff) return true;
-  }
-  return false;
-}
+const SPACE_TEST = /\s/;
+const hasSpace = (s) => SPACE_TEST.test(s);
+
 
 const INLINE_RE = /[\\`*[&<>"']/g;
 const HAS_INLINE = /[\\`*[&<>"']/;
