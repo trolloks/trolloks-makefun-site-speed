@@ -67,13 +67,18 @@ function longDate(date) {
 
 // ------------------------------------------------------------------ markdown
 
-const isBlank = (s) => {
-  for (let i = 0; i < s.length; i++) {
+/** whether `s` holds only spaces and tabs; a line that does not open on one never does. */
+function isBlank(s) {
+  const n = s.length;
+  if (n === 0) return true;
+  const c0 = s.charCodeAt(0);
+  if (c0 !== 32 && c0 !== 9) return false;
+  for (let i = 1; i < n; i++) {
     const c = s.charCodeAt(i);
     if (c !== 32 && c !== 9) return false;
   }
   return true;
-};
+}
 
 const trimLine = (s) => {
   let a = 0;
@@ -200,11 +205,16 @@ function isContinued(line) {
   return false;
 }
 
+/** Whether a line can only be read as anything but a paragraph line: quickly no for a plain one. */
 function endsParagraph(line) {
-  if (isBlank(line)) return true;
-  if (fenceLang(line) !== null) return true;
-  if (headingOf(line) !== null) return true;
-  return isHr(line);
+  const n = line.length;
+  if (n === 0) return true;
+  const c = line.charCodeAt(0);
+  if (c === 32 || c === 9) return isBlank(line);
+  if (c === 35) return headingOf(line) !== null;
+  if (c === 96) return fenceLang(line) !== null;
+  if (c === 45 || c === 42) return isHr(line);
+  return false;
 }
 
 const ESCAPABLE = new Uint8Array(128);
@@ -258,85 +268,90 @@ function hasSpace(s) {
   return false;
 }
 
-function inlineEsc(s, env) {
-  const n = s.length;
+const INLINE_RE = /[\\`*[&<>"']/g;
+
+/**
+ * `s` rendered inline, in one pass: a backslash escape, a code span, strong, emphasis, a link, or one of the
+ * five HTML-escaped characters; `env.link(target)` is a link's href.
+ */
+function inline(s, env) {
   let out = '';
-  let i = 0;
-  let run = 0;
-  while (i < n) {
+  let last = 0;
+  const n = s.length;
+  const re = INLINE_RE;
+  re.lastIndex = 0;
+  for (;;) {
+    const m = re.exec(s);
+    if (m === null) break;
+    const i = m.index;
+    if (i > last) out += s.slice(last, i);
     const c = s.charCodeAt(i);
-    if (c !== 92 && c !== 96 && c !== 42 && c !== 91) {
-      i++;
-      continue;
-    }
-    if (i > run) out += s.slice(run, i);
     if (c === 92) {
       if (i + 1 < n && isEscapable(s.charCodeAt(i + 1))) {
-        out += s[i + 1];
-        i += 2;
+        out += s.charCodeAt(i + 1) === 62 ? '&gt;' : s[i + 1];
+        last = i + 2;
       } else {
         out += '\\';
-        i++;
+        last = i + 1;
       }
-      run = i;
+      re.lastIndex = last;
       continue;
     }
     if (c === 96) {
       const j = s.indexOf('`', i + 1);
       if (j > i + 1) {
-        out += '<code>' + s.slice(i + 1, j) + '</code>';
-        i = j + 1;
+        out += '<code>' + esc(s.slice(i + 1, j)) + '</code>';
+        last = j + 1;
       } else {
         out += '`';
-        i++;
+        last = i + 1;
       }
-      run = i;
+      re.lastIndex = last;
       continue;
     }
     if (c === 42) {
       if (s.charCodeAt(i + 1) === 42) {
         const j = findUnescaped(s, '**', i + 2);
         if (j > i + 2) {
-          out += '<strong>' + inlineEsc(s.slice(i + 2, j), env) + '</strong>';
-          i = j + 2;
+          out += '<strong>' + inline(s.slice(i + 2, j), env) + '</strong>';
+          last = j + 2;
         } else {
           out += '**';
-          i += 2;
+          last = i + 2;
         }
       } else {
         const j = findSingleStar(s, i + 1);
         if (j > i + 1) {
-          out += '<em>' + inlineEsc(s.slice(i + 1, j), env) + '</em>';
-          i = j + 1;
+          out += '<em>' + inline(s.slice(i + 1, j), env) + '</em>';
+          last = j + 1;
         } else {
           out += '*';
-          i++;
+          last = i + 1;
         }
       }
-      run = i;
+      re.lastIndex = last;
       continue;
     }
-    // '['
-    const k = findUnescaped(s, ']', i + 1);
-    const m = k !== -1 && s.charCodeAt(k + 1) === 40 ? s.indexOf(')', k + 2) : -1;
-    const target = m === -1 ? '' : s.slice(k + 2, m);
-    if (target !== '' && !hasSpace(target)) {
-      out += '<a href="' + env.link(target) + '">' + inlineEsc(s.slice(i + 1, k), env) + '</a>';
-      i = m + 1;
-    } else {
-      out += '[';
-      i++;
+    if (c === 91) {
+      const k = findUnescaped(s, ']', i + 1);
+      const m2 = k !== -1 && s.charCodeAt(k + 1) === 40 ? s.indexOf(')', k + 2) : -1;
+      const target = m2 === -1 ? '' : s.slice(k + 2, m2);
+      if (target !== '' && !hasSpace(target)) {
+        out += '<a href="' + esc(env.link(target)) + '">' + inline(s.slice(i + 1, k), env) + '</a>';
+        last = m2 + 1;
+      } else {
+        out += '[';
+        last = i + 1;
+      }
+      re.lastIndex = last;
+      continue;
     }
-    run = i;
+    out += c === 38 ? '&amp;' : c === 60 ? '&lt;' : c === 62 ? '&gt;' : c === 34 ? '&quot;' : '&#39;';
+    last = i + 1;
+    re.lastIndex = last;
   }
-  if (run < n) out += s.slice(run);
+  if (last < n) out += s.slice(last);
   return out;
-}
-
-/** `s` rendered inline: escaped once, then its marks parsed over the escaped text. */
-function inline(s, env) {
-  if (!SPECIAL_RE.test(s)) return inlineEsc(s, env);
-  return inlineEsc(s.replace(ESC_ALL_RE, escText), env);
 }
 
 function renderMarkdown(src, env) {
@@ -349,8 +364,24 @@ function renderMarkdown(src, env) {
   let i = 0;
   while (i < nl) {
     const line = lines[i];
-    if (isBlank(line)) {
+    if (line === '') {
       i++;
+      continue;
+    }
+    const c0 = line.charCodeAt(0);
+    if (c0 === 32 || c0 === 9) {
+      if (isBlank(line)) {
+        i++;
+        continue;
+      }
+    } else if (c0 !== 35 && c0 !== 96 && c0 !== 45 && c0 !== 42 && c0 !== 62 && (c0 < 48 || c0 > 57)) {
+      // a plain paragraph line: none of the block openers start with another character
+      const body = [trimLine(line)];
+      i++;
+      while (i < nl && !endsParagraph(lines[i])) body.push(trimLine(lines[i++]));
+      const html = inline(body.join('\n'), env);
+      if (excerpt === null) excerpt = html;
+      blocks.push('<p>' + html + '</p>');
       continue;
     }
     const fence = fenceLang(line);
@@ -540,6 +571,12 @@ function parseTemplate(name, src) {
   return root.body;
 }
 
+function lookupName(scope, name) {
+  let s = scope;
+  while (s !== null && !Object.hasOwn(s.vars, name)) s = s.parent;
+  return s === null ? undefined : s.vars[name];
+}
+
 function lookup(scope, path) {
   let s = scope;
   const first = path[0];
@@ -615,37 +652,7 @@ function collectReads(nodes, templates, bound, seen, cache, reads) {
   return true;
 }
 
-/** An include's output for these scope values, rendered once and reused while they stay the same. */
-function renderCached(name, nodes, scope, ctx, depth) {
-  const names = ctx.readsOf(name);
-  if (names === null) {
-    const parts = [];
-    renderNodes(nodes, scope, ctx, depth + 1, parts);
-    return parts.join('');
-  }
-  let key = String(depth);
-  const sorted = ctx.sortedReads(name, names);
-  for (let k = 0; k < sorted.length; k++) {
-    const v = lookup(scope, [sorted[k]]);
-    if (v === undefined) key += '|u';
-    else if (v !== null && typeof v === 'object') key += '|o' + ctx.idOf(v);
-    else if (typeof v === 'string') key += '|s' + v;
-    else key += '|n' + (typeof v === 'number' ? v : v === true ? 1 : 0);
-  }
-  let bucket = ctx.cache.get(name);
-  if (bucket === undefined) {
-    bucket = new Map();
-    ctx.cache.set(name, bucket);
-  }
-  const hit = bucket.get(key);
-  if (hit !== undefined) return hit;
-  const parts = [];
-  renderNodes(nodes, scope, ctx, depth + 1, parts);
-  const html = parts.join('');
-  bucket.set(key, html);
-  return html;
-}
-
+/** `nodes` rendered into `parts` in `scope`; includes go through ctx.include, which caches them. */
 function renderNodes(nodes, scope, ctx, depth, parts) {
   for (let q = 0; q < nodes.length; q++) {
     const n = nodes[q];
@@ -669,16 +676,22 @@ function renderNodes(nodes, scope, ctx, depth, parts) {
         const xs = lookup(scope, n.path);
         if (!Array.isArray(xs)) break;
         const len = xs.length;
+        const vars = { [n.name]: undefined, loop: { index: 0, first: false, last: false, length: len } };
+        const inner = { vars, parent: scope };
+        const loop = vars.loop;
         for (let k = 0; k < len; k++) {
-          const vars = { [n.name]: xs[k], loop: { index: k + 1, first: k === 0, last: k === len - 1, length: len } };
-          renderNodes(n.body, { vars, parent: scope }, ctx, depth, parts);
+          vars[n.name] = xs[k];
+          loop.index = k + 1;
+          loop.first = k === 0;
+          loop.last = k === len - 1;
+          renderNodes(n.body, inner, ctx, depth, parts);
         }
         break;
       }
       case 'include': {
         const t = ctx.templates.get(n.name);
         if (t === undefined || depth >= INCLUDE_DEPTH) break;
-        const html = renderCached(n.name, t, scope, ctx, depth);
+        const html = ctx.include(n.name, t, scope, depth);
         if (html !== '') parts.push(html);
         break;
       }
@@ -978,51 +991,62 @@ export function build(input) {
 
   // 6. tags
   const bySlug = new Map();
+  /** A source's tags, each slug once, in its own order: [{ name, slug }]. */
   const ownTags = (s) => {
     const tags = s.data.tags ?? [];
-    const seen = new Set();
     const out = [];
     for (let k = 0; k < tags.length; k++) {
-      const sl = slug(tags[k]);
-      if (!seen.has(sl)) {
-        seen.add(sl);
-        out.push(tags[k]);
+      const name = tags[k];
+      const sl = slug(name);
+      let dup = false;
+      for (let j = 0; j < out.length; j++) {
+        if (out[j].slug === sl) {
+          dup = true;
+          break;
+        }
       }
+      if (!dup) out.push({ name, slug: sl });
     }
     return out;
   };
   for (let k = 0; k < posts.length; k++) {
     const p = posts[k];
-    p.tagRefs = [];
+    const refs = [];
     const names = ownTags(p);
     for (let j = 0; j < names.length; j++) {
-      const name = names[j];
-      const sl = slug(name);
+      const name = names[j].name;
+      const sl = names[j].slug;
       let tag = bySlug.get(sl);
       if (tag === undefined) {
-        tag = { name, slug: sl, url: `${base}/tags/${sl}/`, posts: [] };
+        tag = { name, slug: sl, url: base + '/tags/' + sl + '/', posts: [] };
         bySlug.set(sl, tag);
       }
       tag.posts.push(p);
-      p.tagRefs.push(tag);
+      refs.push(tag);
     }
+    p.tagRefs = refs;
   }
   for (let k = 0; k < kept.length; k++) {
     const s = kept[k];
     if (s.post) continue;
     const names = ownTags(s);
-    s.tagRefs = [];
+    const refs = [];
     for (let j = 0; j < names.length; j++) {
-      const name = names[j];
-      const sl = slug(name);
-      const tag = bySlug.get(sl);
-      s.tagRefs.push(tag !== undefined ? tag : { name, slug: sl, url: '', posts: [] });
+      const tag = bySlug.get(names[j].slug);
+      refs.push(tag !== undefined ? tag : { name: names[j].name, slug: names[j].slug, url: '', posts: [] });
     }
+    s.tagRefs = refs;
   }
   const tagList = Array.from(bySlug.values());
   tagList.sort((x, y) => y.posts.length - x.posts.length || byCodeUnits(x.slug, y.slug));
 
   const linkOf = (s) => (s === null ? null : { title: s.data.title, url: s.url, date: s.data.date ?? '', date_long: s.data.date === undefined ? '' : longDate(s.data.date) });
+
+  const minutesOf = (s) => {
+    const minutes = Math.max(1, Math.ceil(wordsOf(s.body) / 200));
+    s.minutes = minutes;
+    return minutes;
+  };
 
   const cardOf = (s) => {
     const tags = [];
@@ -1037,7 +1061,7 @@ export function build(input) {
       date_long: s.data.date === undefined ? '' : longDate(s.data.date),
       summary: s.data.summary ?? '',
       excerpt: s.excerpt,
-      reading_minutes: Math.max(1, Math.ceil(wordsOf(s.body) / 200)),
+      reading_minutes: s.minutes ?? minutesOf(s),
       tags,
     };
   };
@@ -1073,34 +1097,53 @@ export function build(input) {
   const readsByName = new Map();
   const sortedByName = new Map();
   const ids = new Map();
+  const cache = new Map();
   const ctx = {
     templates,
-    escape: esc,
-    cache: new Map(),
-    readsOf(name) {
-      let r = readsByName.get(name);
-      if (r === undefined) {
-        r = readsOf(name, templates, new Set(), new Set(), readCache);
-        readsByName.set(name, r);
+    include(name, nodes, scope, depth) {
+      let names = readsByName.get(name);
+      if (names === undefined) {
+        names = readsOf(name, templates, new Set(), new Set(), readCache);
+        readsByName.set(name, names);
       }
-      return r;
-    },
-    sortedReads(name, set) {
-      let a = sortedByName.get(name);
-      if (a === undefined) {
-        a = [...set].sort();
-        sortedByName.set(name, a);
+      let bucket;
+      let key;
+      if (names !== null) {
+        key = String(depth);
+        let sorted = sortedByName.get(name);
+        if (sorted === undefined) {
+          sorted = [...names].sort();
+          sortedByName.set(name, sorted);
+        }
+        for (let k = 0; k < sorted.length; k++) {
+          const v = lookupName(scope, sorted[k]);
+          if (v === undefined) key += '|u';
+          else if (v !== null && typeof v === 'object') key += '|o' + idOf(v);
+          else if (typeof v === 'string') key += '|s' + v;
+          else key += '|n' + (typeof v === 'number' ? v : v === true ? 1 : 0);
+        }
+        bucket = cache.get(name);
+        if (bucket === undefined) {
+          bucket = new Map();
+          cache.set(name, bucket);
+        }
+        const hit = bucket.get(key);
+        if (hit !== undefined) return hit;
       }
-      return a;
+      const parts = [];
+      renderNodes(nodes, scope, ctx, depth + 1, parts);
+      const html = parts.join('');
+      if (bucket !== undefined) bucket.set(key, html);
+      return html;
     },
-    idOf(v) {
-      let id = ids.get(v);
-      if (id === undefined) {
-        id = ids.size;
-        ids.set(v, id);
-      }
-      return id;
-    },
+  };
+  const idOf = (v) => {
+    let id = ids.get(v);
+    if (id === undefined) {
+      id = ids.size;
+      ids.set(v, id);
+    }
+    return id;
   };
   const render = (name, vars) => {
     const nodes = templates.get(name);
