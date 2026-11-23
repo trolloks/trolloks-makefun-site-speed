@@ -98,8 +98,13 @@ const trimLine = (s) => {
 };
 
 /** level and text of an ATX heading line, or null. */
+function hasLineSeparator(line) {
+  return line.indexOf('\u2028') !== -1 || line.indexOf('\u2029') !== -1;
+}
+
 function headingOf(line) {
   if (line.charCodeAt(0) !== 35) return null;
+  if (line.indexOf('\u2028') !== -1 || line.indexOf('\u2029') !== -1) return null;
   let level = 0;
   while (level < line.length && line.charCodeAt(level) === 35) level++;
   if (level > 6) return null;
@@ -176,6 +181,7 @@ function isHr(line) {
 function bulletItem(line) {
   const n = line.length;
   if (n < 2) return null;
+  if (line.indexOf('\u2028') !== -1 || line.indexOf('\u2029') !== -1) return null;
   const c0 = line.charCodeAt(0);
   if ((c0 !== 45 && c0 !== 42) || line.charCodeAt(1) !== 32) return null;
   return line.slice(2);
@@ -183,6 +189,7 @@ function bulletItem(line) {
 
 function orderedItem(line) {
   const n = line.length;
+  if (line.indexOf('\u2028') !== -1 || line.indexOf('\u2029') !== -1) return null;
   let i = 0;
   while (i < n && i < 9) {
     const c = line.charCodeAt(i);
@@ -194,15 +201,12 @@ function orderedItem(line) {
 }
 
 function isContinued(line) {
-  if (line.length < 3) return false;
-  if (line.charCodeAt(0) !== 32 || line.charCodeAt(1) !== 32) return false;
-  let i = 2;
-  while (i < line.length) {
-    const c = line.charCodeAt(i);
-    if (c !== 32 && c !== 9) return true;
-    i++;
-  }
-  return false;
+  let i = 0;
+  while (i < line.length && line.charCodeAt(i) === 32) i++;
+  if (i < 2 || i >= line.length) return false;
+  const c = line.charCodeAt(i);
+  if (c < 128) return SPACE[c] === 0;
+  return !(c === 0xa0 || (c >= 0x1680 && (c === 0x1680 || (c >= 0x2000 && c <= 0x200a) || c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000 || c === 0xfeff)));
 }
 
 /** Whether a line can only be read as anything but a paragraph line: quickly no for a plain one. */
@@ -680,7 +684,7 @@ function renderNodes(nodes, scope, ctx, depth, parts) {
         const inner = { vars, parent: scope };
         const loop = vars.loop;
         for (let k = 0; k < len; k++) {
-          vars[n.name] = xs[k];
+          if (n.name !== 'loop') vars[n.name] = xs[k];
           loop.index = k + 1;
           loop.first = k === 0;
           loop.last = k === len - 1;
