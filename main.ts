@@ -1,17 +1,16 @@
-// makefun-site 1.0.0, the house entry, make.fun's own reference program: the harness runs `node /bot/main.ts` (node22). It reads every case from /input/cases.json (a JSON
-// array of {id, input}), answers each one alone with run() from solve.js, and writes /output/answers.json: a JSON
-// array of the answers, one per case and in the cases' order. An entry keeps this driver and replaces solve.js with a
-// faster module whose run(input) returns the same answer for every input. Outside a container MAKEFUN_INPUT_DIR and MAKEFUN_OUTPUT_DIR stand in for /input and /output.
+// A fresh-process driver for the entry, graded the way the harness runs it: node main.ts.
+// V8 flags are set before solve.js loads, so all of the build runs under them (the rules allow tuning them;
+// the house baseline turns incremental marking off, and on a single cold run TurboFan's work costs more
+// than the code it optimizes, so optimization is off too).
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setFlagsFromString } from 'node:v8';
 
-// V8's incremental marking off, set before solve.js is imported so all of its work runs under it (the rules: the house
-// baseline runs with --no-incremental-marking, and an entry may tune V8's flags too).
 setFlagsFromString('--no-incremental-marking');
+setFlagsFromString('--no-opt');
 
-/** solve.js, imported by its URL (a .js module carries no types) and typed by its contract. */
+/** solve.js, imported by its URL. */
 const { run } = (await import(new URL('./solve.js', import.meta.url).href)) as { run: (input: unknown) => unknown };
 
 const INPUT_DIR = process.env.MAKEFUN_INPUT_DIR ?? '/input';

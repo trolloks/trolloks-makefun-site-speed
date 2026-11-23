@@ -214,38 +214,35 @@ function isEscapable(c) {
   return c < 128 && ESCAPABLE[c] === 1;
 }
 
+/** whether the character at `j` is backslash-escaped (an odd run of backslashes before it). */
+function escapedAt(s, j) {
+  let b = j - 1;
+  let count = 0;
+  while (b >= 0 && s.charCodeAt(b) === 92) {
+    count++;
+    b--;
+  }
+  return (count & 1) === 1;
+}
+
 function findUnescaped(s, what, from) {
-  const wl = what.length;
-  const n = s.length;
-  for (let j = from; j <= n - wl; j++) {
-    const c = s.charCodeAt(j);
-    if (c === 92 && j + 1 < n && isEscapable(s.charCodeAt(j + 1))) {
-      j++;
-      continue;
-    }
-    let ok = true;
-    for (let k = 0; k < wl; k++) {
-      if (s.charCodeAt(j + k) !== what.charCodeAt(k)) {
-        ok = false;
-        break;
-      }
-    }
-    if (ok) return j;
+  let j = s.indexOf(what, from);
+  while (j !== -1) {
+    if (!escapedAt(s, j)) return j;
+    j = s.indexOf(what, j + 1);
   }
   return -1;
 }
 
 function findSingleStar(s, from) {
-  const n = s.length;
-  for (let j = from; j < n; j++) {
-    const c = s.charCodeAt(j);
-    if (c === 92 && j + 1 < n && isEscapable(s.charCodeAt(j + 1))) {
-      j++;
+  let j = s.indexOf('*', from);
+  while (j !== -1) {
+    if (escapedAt(s, j)) {
+      j = s.indexOf('*', j + 1);
       continue;
     }
-    if (c !== 42) continue;
     if (s.charCodeAt(j + 1) === 42) {
-      j++;
+      j = s.indexOf('*', j + 2);
       continue;
     }
     return j;
@@ -573,24 +570,99 @@ function truthy(v) {
   return v !== undefined && v !== null && v !== false && v !== '' && v !== 0;
 }
 
-function renderNodes(nodes, scope, ctx, depth) {
-  let out = '';
+/** The names a template (and the templates it includes) reads from the scope that includes it; null on a cycle. */
+function readsOf(name, templates, bound, seen, cache) {
+  const hit = cache.get(name);
+  if (hit !== undefined && bound.size === 0) return hit;
+  if (seen.has(name)) return null;
+  seen.add(name);
+  const reads = new Set();
+  const ok = collectReads(templates.get(name), templates, bound, seen, cache, reads);
+  seen.delete(name);
+  if (!ok) return null;
+  if (bound.size === 0) cache.set(name, reads);
+  return reads;
+}
+
+function collectReads(nodes, templates, bound, seen, cache, reads) {
+  for (let q = 0; q < nodes.length; q++) {
+    const n = nodes[q];
+    switch (n.kind) {
+      case 'var':
+      case 'raw':
+        if (!bound.has(n.path[0])) reads.add(n.path[0]);
+        break;
+      case 'if':
+        if (!bound.has(n.path[0])) reads.add(n.path[0]);
+        if (!collectReads(n.then, templates, bound, seen, cache, reads)) return false;
+        if (n.else !== null && !collectReads(n.else, templates, bound, seen, cache, reads)) return false;
+        break;
+      case 'for': {
+        if (!bound.has(n.path[0])) reads.add(n.path[0]);
+        const inner = new Set(bound);
+        inner.add(n.name);
+        if (!collectReads(n.body, templates, inner, seen, cache, reads)) return false;
+        break;
+      }
+      case 'include': {
+        const sub = readsOf(n.name, templates, bound, seen, cache);
+        if (sub === null) return false;
+        for (const r of sub) reads.add(r);
+        break;
+      }
+    }
+  }
+  return true;
+}
+
+/** An include's output for these scope values, rendered once and reused while they stay the same. */
+function renderCached(name, nodes, scope, ctx, depth) {
+  const names = ctx.readsOf(name);
+  if (names === null) {
+    const parts = [];
+    renderNodes(nodes, scope, ctx, depth + 1, parts);
+    return parts.join('');
+  }
+  let key = String(depth);
+  const sorted = ctx.sortedReads(name, names);
+  for (let k = 0; k < sorted.length; k++) {
+    const v = lookup(scope, [sorted[k]]);
+    if (v === undefined) key += '|u';
+    else if (v !== null && typeof v === 'object') key += '|o' + ctx.idOf(v);
+    else if (typeof v === 'string') key += '|s' + v;
+    else key += '|n' + (typeof v === 'number' ? v : v === true ? 1 : 0);
+  }
+  let bucket = ctx.cache.get(name);
+  if (bucket === undefined) {
+    bucket = new Map();
+    ctx.cache.set(name, bucket);
+  }
+  const hit = bucket.get(key);
+  if (hit !== undefined) return hit;
+  const parts = [];
+  renderNodes(nodes, scope, ctx, depth + 1, parts);
+  const html = parts.join('');
+  bucket.set(key, html);
+  return html;
+}
+
+function renderNodes(nodes, scope, ctx, depth, parts) {
   for (let q = 0; q < nodes.length; q++) {
     const n = nodes[q];
     switch (n.kind) {
       case 'text':
-        out += n.text;
+        parts.push(n.text);
         break;
       case 'var':
-        out += esc(textOf(lookup(scope, n.path)));
+        parts.push(esc(textOf(lookup(scope, n.path))));
         break;
       case 'raw':
-        out += textOf(lookup(scope, n.path));
+        parts.push(textOf(lookup(scope, n.path)));
         break;
       case 'if': {
         const v = truthy(lookup(scope, n.path));
         const branch = v !== n.not ? n.then : n.else;
-        if (branch !== null) out += renderNodes(branch, scope, ctx, depth);
+        if (branch !== null) renderNodes(branch, scope, ctx, depth, parts);
         break;
       }
       case 'for': {
@@ -599,18 +671,19 @@ function renderNodes(nodes, scope, ctx, depth) {
         const len = xs.length;
         for (let k = 0; k < len; k++) {
           const vars = { [n.name]: xs[k], loop: { index: k + 1, first: k === 0, last: k === len - 1, length: len } };
-          out += renderNodes(n.body, { vars, parent: scope }, ctx, depth);
+          renderNodes(n.body, { vars, parent: scope }, ctx, depth, parts);
         }
         break;
       }
       case 'include': {
         const t = ctx.templates.get(n.name);
-        if (t !== undefined && depth < INCLUDE_DEPTH) out += renderNodes(t, scope, ctx, depth + 1);
+        if (t === undefined || depth >= INCLUDE_DEPTH) break;
+        const html = renderCached(n.name, t, scope, ctx, depth);
+        if (html !== '') parts.push(html);
         break;
       }
     }
   }
-  return out;
 }
 
 // ------------------------------------------------------------------ front matter
@@ -685,16 +758,22 @@ function valueOf(key, raw) {
 /** front matter and body of a source with "\n" line ends. */
 function parseFrontMatter(text) {
   if (!text.startsWith('---\n') && text !== '---') return { error: 'no front matter' };
-  const lines = text.split('\n');
-  if (lines[0] !== '---') return { error: 'no front matter' };
-  let close = -1;
-  for (let i = 1; i < lines.length; i++) {
-    if (lines[i] === '---') {
-      close = i;
+  // The closing line is the first "---" line after the opener; find it without splitting the whole source.
+  let closeAt = -1;
+  let from = 4;
+  for (;;) {
+    const at = text.indexOf('---', from);
+    if (at === -1) break;
+    const end = at + 3;
+    if ((at === 0 || text.charCodeAt(at - 1) === 10) && (end === text.length || text.charCodeAt(end) === 10)) {
+      closeAt = at;
       break;
     }
+    from = at + 1;
   }
-  if (close === -1) return { error: 'the front matter is not closed' };
+  if (closeAt === -1) return { error: 'the front matter is not closed' };
+  const lines = text.slice(0, closeAt).split('\n');
+  const close = lines.length - 1;
   const data = {};
   for (let i = 1; i < close; i++) {
     const line = lines[i];
@@ -719,7 +798,7 @@ function parseFrontMatter(text) {
     data[key] = v.value;
   }
   if (!Object.hasOwn(data, 'title')) return { error: 'no title' };
-  return { data, body: lines.slice(close + 1).join('\n') };
+  return { data, body: text.slice(closeAt + 3 === text.length ? text.length : closeAt + 4) };
 }
 
 // ------------------------------------------------------------------ build
@@ -740,12 +819,17 @@ function resolvePath(dir, rel) {
   return parts.join('/');
 }
 
+const SPACE = new Uint8Array(128);
+for (const ch of ' \t\n\v\f\r') SPACE[ch.charCodeAt(0)] = 1;
+
 function wordsOf(text) {
   let n = 0;
   let inWord = false;
   for (let i = 0; i < text.length; i++) {
     const c = text.charCodeAt(i);
-    const space = c === 32 || c === 9 || c === 10 || c === 13 || c === 11 || c === 12 || c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a) || c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000 || c === 0xfeff;
+    let space;
+    if (c < 128) space = SPACE[c] === 1;
+    else space = c === 0xa0 || (c >= 0x1680 && (c === 0x1680 || (c >= 0x2000 && c <= 0x200a) || c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000 || c === 0xfeff));
     if (space) inWord = false;
     else if (!inWord) {
       inWord = true;
@@ -985,11 +1069,45 @@ export function build(input) {
   const site = { title: input.site.title, base_url: base };
   const allTags = tagList.map((t) => ({ name: t.name, slug: t.slug, url: t.url, count: t.posts.length }));
   const recent = posts.slice(0, input.site.recent).map((p) => cards.get(p));
-  const ctx = { templates, escape: esc };
+  const readCache = new Map();
+  const readsByName = new Map();
+  const sortedByName = new Map();
+  const ids = new Map();
+  const ctx = {
+    templates,
+    escape: esc,
+    cache: new Map(),
+    readsOf(name) {
+      let r = readsByName.get(name);
+      if (r === undefined) {
+        r = readsOf(name, templates, new Set(), new Set(), readCache);
+        readsByName.set(name, r);
+      }
+      return r;
+    },
+    sortedReads(name, set) {
+      let a = sortedByName.get(name);
+      if (a === undefined) {
+        a = [...set].sort();
+        sortedByName.set(name, a);
+      }
+      return a;
+    },
+    idOf(v) {
+      let id = ids.get(v);
+      if (id === undefined) {
+        id = ids.size;
+        ids.set(v, id);
+      }
+      return id;
+    },
+  };
   const render = (name, vars) => {
     const nodes = templates.get(name);
     if (nodes === undefined) return null;
-    return renderNodes(nodes, { vars: { site, tags: allTags, recent, ...vars }, parent: null }, ctx, 0);
+    const parts = [];
+    renderNodes(nodes, { vars: { site, tags: allTags, recent, ...vars }, parent: null }, ctx, 0, parts);
+    return parts.join('');
   };
   const output = {};
   for (let k = 0; k < kept.length; k++) {
