@@ -534,40 +534,40 @@ function tokenize(name, src) {
 }
 
 function parseTemplate(name, src) {
-  const root = { kind: 'root', body: [] };
+  const root = { kind: 6, body: [] };
   const stack = [root];
   let body = root.body;
   for (const tok of tokenize(name, src)) {
-    if (tok.t === 'text') body.push({ kind: 'text', text: tok.text });
-    else if (tok.t === 'var' || tok.t === 'raw') body.push({ kind: tok.t, path: tok.path });
+    if (tok.t === 'text') body.push({ kind: 0, text: tok.text });
+    else if (tok.t === 'var' || tok.t === 'raw') body.push({ kind: tok.t === 'var' ? 1 : 2, path: tok.path });
     else {
       const tag = tok.tag;
       const top = stack[stack.length - 1];
       let m;
       if ((m = FOR_RE.exec(tag)) !== null) {
-        const node = { kind: 'for', name: m[1], path: pathOf(name, m[2]), body: [] };
+        const node = { kind: 4, name: m[1], path: pathOf(name, m[2]), body: [] };
         body.push(node);
         stack.push(node);
         body = node.body;
       } else if ((m = IF_RE.exec(tag)) !== null) {
-        const node = { kind: 'if', not: m[1] !== undefined, path: pathOf(name, m[2]), then: [], else: null };
+        const node = { kind: 3, not: m[1] !== undefined, path: pathOf(name, m[2]), then: [], else: null };
         body.push(node);
         stack.push(node);
         body = node.then;
       } else if (tag === 'else') {
-        if (top.kind !== 'if' || top.else !== null) throw new TemplateError(`template "${name}": an else outside an if`);
+        if (top.kind !== 3 || top.else !== null) throw new TemplateError(`template "${name}": an else outside an if`);
         top.else = [];
         body = top.else;
       } else if (tag === 'endfor' || tag === 'endif') {
-        if (top.kind !== (tag === 'endfor' ? 'for' : 'if')) throw new TemplateError(`template "${name}": an ${tag} with no open ${tag.slice(3)}`);
+        if (top.kind !== (tag === 'endfor' ? 4 : 3)) throw new TemplateError(`template "${name}": an ${tag} with no open ${tag.slice(3)}`);
         stack.pop();
         const parent = stack[stack.length - 1];
-        body = parent.kind === 'root' ? parent.body : parent.kind === 'for' ? parent.body : parent.else ?? parent.then;
-      } else if ((m = INCLUDE_RE.exec(tag)) !== null) body.push({ kind: 'include', name: m[1] });
+        body = parent.kind === 6 ? parent.body : parent.kind === 4 ? parent.body : parent.else ?? parent.then;
+      } else if ((m = INCLUDE_RE.exec(tag)) !== null) body.push({ kind: 5, name: m[1] });
       else throw new TemplateError(`template "${name}": {% ${tag} %} is not a tag`);
     }
   }
-  if (stack.length > 1) throw new TemplateError(`template "${name}": a ${stack[stack.length - 1].kind} is not closed`);
+  if (stack.length > 1) throw new TemplateError(`template "${name}": a ${stack[stack.length - 1].kind === 4 ? 'for' : 'if'} is not closed`);
   return root.body;
 }
 
@@ -625,23 +625,23 @@ function collectReads(nodes, templates, bound, seen, cache, reads) {
   for (let q = 0; q < nodes.length; q++) {
     const n = nodes[q];
     switch (n.kind) {
-      case 'var':
-      case 'raw':
+      case 1:
+      case 2:
         if (!bound.has(n.path[0])) reads.add(n.path[0]);
         break;
-      case 'if':
+      case 3:
         if (!bound.has(n.path[0])) reads.add(n.path[0]);
         if (!collectReads(n.then, templates, bound, seen, cache, reads)) return false;
         if (n.else !== null && !collectReads(n.else, templates, bound, seen, cache, reads)) return false;
         break;
-      case 'for': {
+      case 4: {
         if (!bound.has(n.path[0])) reads.add(n.path[0]);
         const inner = new Set(bound);
         inner.add(n.name);
         if (!collectReads(n.body, templates, inner, seen, cache, reads)) return false;
         break;
       }
-      case 'include': {
+      case 5: {
         const sub = readsOf(n.name, templates, bound, seen, cache);
         if (sub === null) return false;
         for (const r of sub) reads.add(r);
@@ -657,22 +657,22 @@ function renderNodes(nodes, scope, ctx, depth, parts) {
   for (let q = 0; q < nodes.length; q++) {
     const n = nodes[q];
     switch (n.kind) {
-      case 'text':
+      case 0:
         parts.push(n.text);
         break;
-      case 'var':
+      case 1:
         parts.push(esc(textOf(lookup(scope, n.path))));
         break;
-      case 'raw':
+      case 2:
         parts.push(textOf(lookup(scope, n.path)));
         break;
-      case 'if': {
+      case 3: {
         const v = truthy(lookup(scope, n.path));
         const branch = v !== n.not ? n.then : n.else;
         if (branch !== null) renderNodes(branch, scope, ctx, depth, parts);
         break;
       }
-      case 'for': {
+      case 4: {
         const xs = lookup(scope, n.path);
         if (!Array.isArray(xs)) break;
         const len = xs.length;
@@ -688,9 +688,14 @@ function renderNodes(nodes, scope, ctx, depth, parts) {
         }
         break;
       }
-      case 'include': {
-        const t = ctx.templates.get(n.name);
-        if (t === undefined || depth >= INCLUDE_DEPTH) break;
+      case 5: {
+        let t = n.nodes;
+        if (t === undefined) {
+          t = ctx.templates.get(n.name);
+          if (t === undefined) t = null;
+          n.nodes = t;
+        }
+        if (t === null || depth >= INCLUDE_DEPTH) break;
         const html = ctx.include(n.name, t, scope, depth);
         if (html !== '') parts.push(html);
         break;
@@ -819,6 +824,9 @@ function parseFrontMatter(text) {
 const dirOf = (path) => (path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '');
 
 function resolvePath(dir, rel) {
+  if (rel.indexOf('..') === -1 && rel.indexOf('./') === -1 && rel.indexOf('//') === -1 && rel.charCodeAt(0) !== 47) {
+    return dir === '' ? rel : dir + '/' + rel;
+  }
   const parts = dir === '' ? [] : dir.split('/');
   const segs = rel.split('/');
   for (let k = 0; k < segs.length; k++) {
@@ -937,7 +945,8 @@ export function build(input) {
   const bySource = new Map();
   for (let k = 0; k < kept.length; k++) {
     const s = kept[k];
-    const dir = s.post ? 'posts' : dirOf(s.path);
+    s.dir = dirOf(s.path);
+    const dir = s.post ? 'posts' : s.dir;
     let set = taken.get(dir);
     if (set === undefined) {
       set = new Set(dir === '' ? RESERVED : []);
@@ -956,7 +965,7 @@ export function build(input) {
   for (let k = 0; k < statics.length; k++) staticPaths.add(statics[k].path);
   for (let k = 0; k < kept.length; k++) {
     const s = kept[k];
-    const dir = dirOf(s.path);
+    const dir = s.dir;
     const env = {
       link: (target) => {
         const c0 = target.charCodeAt(0);
