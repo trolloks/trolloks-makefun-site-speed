@@ -299,85 +299,84 @@ const HAS_MARKS = /[\\`*[]/;
  */
 function inline(s, env) {
   if (!HAS_INLINE.test(s)) return s;
-  // text with only HTML-special characters (no Markdown mark) is one native replace
   if (!HAS_MARKS.test(s)) return esc(s);
-  let out = '';
+  const parts = [];
   let last = 0;
   const n = s.length;
   const re = INLINE_RE;
-  re.lastIndex = 0;
+  const flush = (to) => { if (to > last) parts.push(s.slice(last, to)); };
   for (;;) {
+    re.lastIndex = last;
     const m = re.exec(s);
     if (m === null) break;
     const i = m.index;
-    if (i > last) out += s.slice(last, i);
     const c = s.charCodeAt(i);
     if (c === 92) {
+      flush(i);
       if (i + 1 < n && isEscapable(s.charCodeAt(i + 1))) {
-        out += s.charCodeAt(i + 1) === 62 ? '&gt;' : s[i + 1];
+        parts.push(s.charCodeAt(i + 1) === 62 ? '&gt;' : s[i + 1]);
         last = i + 2;
       } else {
-        out += '\\';
+        parts.push('\\');
         last = i + 1;
       }
-      re.lastIndex = last;
       continue;
     }
     if (c === 96) {
       const j = s.indexOf('`', i + 1);
+      flush(i);
       if (j > i + 1) {
-        out += '<code>' + esc(s.slice(i + 1, j)) + '</code>';
+        parts.push('<code>', esc(s.slice(i + 1, j)), '</code>');
         last = j + 1;
       } else {
-        out += '`';
+        parts.push('`');
         last = i + 1;
       }
-      re.lastIndex = last;
       continue;
     }
     if (c === 42) {
+      flush(i);
       if (s.charCodeAt(i + 1) === 42) {
         const j = findUnescaped(s, '**', i + 2);
         if (j > i + 2) {
-          out += '<strong>' + inline(s.slice(i + 2, j), env) + '</strong>';
+          parts.push('<strong>', inline(s.slice(i + 2, j), env), '</strong>');
           last = j + 2;
         } else {
-          out += '**';
+          parts.push('**');
           last = i + 2;
         }
       } else {
         const j = findSingleStar(s, i + 1);
         if (j > i + 1) {
-          out += '<em>' + inline(s.slice(i + 1, j), env) + '</em>';
+          parts.push('<em>', inline(s.slice(i + 1, j), env), '</em>');
           last = j + 1;
         } else {
-          out += '*';
+          parts.push('*');
           last = i + 1;
         }
       }
-      re.lastIndex = last;
       continue;
     }
     if (c === 91) {
       const k = findUnescaped(s, ']', i + 1);
       const m2 = k !== -1 && s.charCodeAt(k + 1) === 40 ? s.indexOf(')', k + 2) : -1;
       const target = m2 === -1 ? '' : s.slice(k + 2, m2);
+      flush(i);
       if (target !== '' && !hasSpace(target)) {
-        out += '<a href="' + env.link(target) + '">' + inline(s.slice(i + 1, k), env) + '</a>';
+        parts.push('<a href="', env.link(target), '">', inline(s.slice(i + 1, k), env), '</a>');
         last = m2 + 1;
       } else {
-        out += '[';
+        parts.push('[');
         last = i + 1;
       }
-      re.lastIndex = last;
       continue;
     }
-    out += c === 38 ? '&amp;' : c === 60 ? '&lt;' : c === 62 ? '&gt;' : c === 34 ? '&quot;' : '&#39;';
+    flush(i);
+    parts.push(c === 38 ? '&amp;' : c === 60 ? '&lt;' : c === 62 ? '&gt;' : c === 34 ? '&quot;' : '&#39;');
     last = i + 1;
-    re.lastIndex = last;
   }
-  if (last < n) out += s.slice(last);
-  return out;
+  if (last < n) parts.push(s.slice(last));
+  return parts.join('');
 }
 
 function renderMarkdown(src, env) {
