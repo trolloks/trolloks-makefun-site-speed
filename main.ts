@@ -1,1 +1,1 @@
-process.dlopen(module,"/bot/engine.node")
+main.js
